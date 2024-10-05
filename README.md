@@ -1,5 +1,7 @@
-# Code for the paper Modality-Aware Representation Network for Rumor Detection with Multitask Optimization Learning
-  
+# Code for the paper: Modality-Aware Representation Network for Rumor Detection with Multitask Optimization Learning
+![image](https://github.com/user-attachments/assets/88b9e0fa-3f29-4d9b-9db9-ffc659494660)
+
+
 # Dataset
   The datasets used in the experiments were based on the two publicly available Weibo and PHEME datasets released by Song et al. (2019) and Zubiaga et al. (2017), and the preprocess process was based on the work by Yuan et al. (2019):
   
