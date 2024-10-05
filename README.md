@@ -1,5 +1,6 @@
 # MFAN
-  Code for the IJCAI-ECAI 2022 paper [MFAN: Multi-modal Feature-enhanced Attention Networks for Rumor Detection](https://www.ijcai.org/proceedings/2022/0335.pdf)
+  Code for the paper Modality-Aware Representation Network for Rumor
+Detection with Multitask Optimization Learning
 # Dataset
   The datasets used in the experiments were based on the two publicly available Weibo and PHEME datasets released by Song et al. (2019) and Zubiaga et al. (2017), and the preprocess process was based on the work by Yuan et al. (2019):
   
@@ -14,7 +15,7 @@
   Our code runs with the following packages installed:
   ```
     python 3.8
-    torch 1.7.1 + cu10.2
+    torch 2.0 + cuda11.8
     torch-geometric=1.6.3=pypi_0
     torch-scatter=2.0.5=pypi_0
     torch-sparse=0.6.8=pypi_0
@@ -28,6 +29,6 @@
  # Run
  Train and test
  ```
- cd ./graph_part
- python pheme_threemodal.py 
+ cd ./graph_part/code_v1
+ python model_pheme_best.py 
  ```
