@@ -3,7 +3,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 # 多模态对比损失
 class MultimodalContrastiveLoss(nn.Module):
     def __init__(self, device, batch_size, temp=0.1, ):
@@ -145,6 +144,9 @@ def kl_loss(p, q, pad_mask=None):
     return loss
 
 
+
+###########################################################  多个loss的权衡【开始】  ###########################################################
+
 # geometric loss 将MTL任务中的多个loss用几何方式组合，相比直接对多个loss求平均的组合方式，能够更好的应对不同的task之间的收敛速度不一样的问题。
 # 来源于论文：MultiNet++: Multi-Stream Feature Aggregation and Geometric Loss Strategy for Multi-Task Learning
 def geometric_loss(losses, important=None):
@@ -165,6 +167,25 @@ def geometric_loss(losses, important=None):
         imp = imp ** (1 / len(important))
         return res * imp
     return res
+
+
+def detach_loss(losses):
+    ## 三个loss,用于分类的主loss,模态对齐的loss,对比loss
+    res = 0.0
+    for loss in losses:
+        res += loss / (torch.exp(loss)).detach()
+    return res
+
+
+def detach_loss_v2(losses):
+    ## 三个loss,用于分类的主loss,模态对齐的loss,对比loss
+    res = losses[0]
+    n = len(losses)
+    for i in range(1, n):
+        res += losses[i] / (losses[i] / losses[0]).detach()
+    return res
+
+###########################################################  多个loss的权衡【结束】  ###########################################################
 
 
 # 无监督对比损失，来源于论文： Graph Contrastive Learning with Adaptive Augmentation (WWW 2021)
@@ -223,3 +244,4 @@ class ContrastiveLoss(nn.Module):
         ret = ret.mean() if mean else ret.sum()
 
         return ret
+

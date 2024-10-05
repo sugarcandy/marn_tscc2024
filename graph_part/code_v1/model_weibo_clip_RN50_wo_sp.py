@@ -1,16 +1,12 @@
 """
-多模态融合+对比学习
-其中对比学习用于将同标签的距离拉近，不同标签的距离拉远
-使用对比学习进行模态对齐
-此处的loss之间的权重为手动设置
-
-在best的基础上去掉梯度裁剪
+不使用模态特定信息
 """
 
 import os
 
 # from ClippyAdam import ClippyAdam
 
+# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import csv
 import torch
@@ -31,10 +27,11 @@ import argparse
 import warnings
 import random
 import sys
+import clip
 from PIL import Image
 
 sys.path.append('/../image_part')
-from graph_part import config_file
+from graph_part.code_v1 import config_file
 from graph_part.layer import *
 from graph_part.utils import *
 from graph_part.align_loss import *
@@ -73,6 +70,10 @@ class NeuralNetwork(nn.Module):
         self.optimizer.zero_grad()
         # 这里调用mfan的forward
         logit_original, dist_og, hidden, features = self.forward(x_tid, x_text)
+        # print(f"第{i}个批次的logits")
+        # print(logit_original)
+        # print(f"第{i}个批次的label")
+        # print(y)
         # 分类损失
         loss_classification = loss(logit_original, y)
 
@@ -82,7 +83,7 @@ class NeuralNetwork(nn.Module):
 
         # hidden的shape为[batch_size,output_dim]
         # 此时features的shape为[batch_size,2,output_dim],为每一份数据创建了一个副本，进行对比
-        loss_cons = SupConLoss(temperature=1.0)
+        loss_cons = SupConLoss(temperature=2.0) ## 1.0时候0.8949
         loss_constrative = loss_cons(features, y)
 
         losses = [loss_classification, loss_constrative, loss_dis]
@@ -104,7 +105,7 @@ class NeuralNetwork(nn.Module):
             loss_adv = loss(loss_adv, y)
             loss_adv.backward()
         pgd_word.restore()
-        nn.utils.clip_grad_norm_(self.parameters(), max_norm=5, norm_type=2)  # 使用第二种裁剪方式
+        # nn.utils.clip_grad_norm_(self.parameters(), max_norm=10, norm_type=2)  # 使用第二种裁剪方式
         self.optimizer.step()
         corrects = (torch.max(logit_original, 1)[1].view(y.size()).data == y.data).sum()
         accuracy = 100 * corrects / len(y)
@@ -121,7 +122,7 @@ class NeuralNetwork(nn.Module):
         if torch.cuda.is_available():
             self.cuda()
         batch_size = self.config['batch_size']
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=2e-3, weight_decay=0)
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=2e-3)  # 原始值为2e-3
 
         X_train_tid = torch.LongTensor(X_train_tid)
         X_train = torch.LongTensor(X_train)
@@ -129,9 +130,9 @@ class NeuralNetwork(nn.Module):
 
         # DataLoader
         dataset = TensorDataset(X_train_tid, X_train, y_train)
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
-        loss = nn.CrossEntropyLoss()
+        loss = nn.NLLLoss()
         params = [(name, param) for name, param in self.named_parameters()]
         pgd_word = PGD(self, emb_name='word_embedding', epsilon=6, alpha=1.8)
 
@@ -212,6 +213,30 @@ class resnet50():
         return img_output
 
 
+## 通过Clip加载图像
+class ClipModel:
+    def __init__(self, model, preprocess, device):
+        self.newid2imgnum = config['newid2imgnum']
+        self.model = model
+        self.model.visual.attnpool.c_proj = torch.nn.Linear(2048, 300, dtype=torch.float16).cuda()
+        torch.nn.init.eye_(self.model.visual.attnpool.c_proj.weight)
+        self.path = os.path.dirname(os.getcwd()) + '/../dataset/weibo/weibo_images/weibo_images_all/'
+        self.trans = preprocess
+        self.device = device
+
+    def forward(self, xtid):
+        img_list = []
+        for newid in xtid.cpu().numpy():
+            imgnum = self.newid2imgnum[newid]
+            imgpath = self.path + imgnum + '.jpg'
+            im = self.trans(Image.open(imgpath)).unsqueeze(0)
+            img_list.append(im)
+        batch_img = torch.cat(img_list, dim=0).to(device=self.device)
+        with torch.no_grad():
+            img_output = self.model.encode_image(batch_img)  ## (64,512)
+        return img_output.to(torch.float32)
+
+
 class MFAN(NeuralNetwork):
     def __init__(self, config, adj, original_adj):
         super(MFAN, self).__init__()
@@ -225,13 +250,16 @@ class MFAN(NeuralNetwork):
         self.mh_attention = TransformerBlock(input_size=300, n_heads=8, attn_dropout=0)
         self.word_embedding = nn.Embedding(num_embeddings=V, embedding_dim=D, padding_idx=0,
                                            _weight=torch.from_numpy(embedding_weights))
+        self.text_embedding = LSTMEncoder(input_size=300, hidden_size=300, num_layers=1)
         self.cosmatrix = self.calculate_cos_matrix()
         self.gat_relation = Signed_GAT(node_embedding=config['node_embedding'], cosmatrix=self.cosmatrix, nfeat=300, \
                                        uV=self.uV, nb_heads=1,
                                        original_adj=original_adj, dropout=0)
         self.image_embedding = resnet50()
+        clip_model, preprocess = clip.load("RN50", device=self.device)  ## ViT-B/32效果不好,这个0.8831
+        self.image_embedding2 = ClipModel(clip_model, preprocess, device=self.device)
         fusion_dim = config['fusion_dim']
-        self.model_fusion = VLTransformer(fusion_dim, config)
+        self.model_fusion = VLTransformer2(fusion_dim, config)
         self.convs = nn.ModuleList([nn.Conv1d(300, 100, kernel_size=K) for K in config['kernel_sizes']])
         self.max_poolings = nn.ModuleList([nn.MaxPool1d(kernel_size=maxlen - K + 1) for K in config['kernel_sizes']])
         self.relu = nn.ReLU()
@@ -258,11 +286,15 @@ class MFAN(NeuralNetwork):
         X_text = self.word_embedding(X_text)
         if self.config['user_self_attention'] == True:
             X_text = self.mh_attention(X_text, X_text, X_text)
+        # 修改文本编码器为lstm
+        X_text, _ = self.text_embedding(X_text)
         X_text = X_text.permute(0, 2, 1)
         # 从GAT获取传播结构
         rembedding = self.gat_relation.forward(X_tid)
-        # resnet50获取图像嵌入
-        iembedding = self.image_embedding.forward(X_tid)
+        # # resnet50获取图像嵌入
+        # iembedding = self.image_embedding.forward(X_tid)
+        ## 更换图像编码器为Cliptengx
+        iembedding = self.image_embedding2.forward(X_tid)
         conv_block = [rembedding]
         for _, (Conv, max_pooling) in enumerate(zip(self.convs, self.max_poolings)):
             act = self.relu(Conv(X_text))
@@ -358,7 +390,7 @@ def train_and_test(model):
 
     # 最优模型路径
     config['save_path'] = os.path.join(res_dir, args.thread_name + '_' + 'config' + args.config_name.split(".")[
-        0] + '_best_model_weights_' + model_suffix + '_best4')
+        0] + '_best_model_weights_' + model_suffix + 'lstmwithclip_nllLoss_wosp')
     dir_path = os.path.join('exp_result', args.task, args.description)
     if not os.path.exists(dir_path):
         os.mkdir(dir_path)
@@ -381,7 +413,11 @@ def train_and_test(model):
 
     # 当前最佳模型
     nn.load_state_dict(torch.load(
-        "../exp_result/weibo2/exp_description/best_model_in_each_config/best_model_weibo_second"))
+        "exp_result/weibo2/exp_description/best_model_in_each_config/Thread-1_configsingle3_best_model_weights_mfanlstmwithclip_nllLoss_wosp"))
+
+    # 最佳模型
+    # nn.load_state_dict(torch.load(
+    #     "exp_result/weibo2/exp_description/best_model_in_each_config/best_model"))
     y_pred = nn.predict(X_test_tid, X_test)
     res = classification_report(y_test, y_pred, target_names=config['target_names'], digits=3, output_dict=True)
     for k, v in res.items():
@@ -394,15 +430,13 @@ def train_and_test(model):
     print(res)
     return res
 
-
-if __name__ == '__main__':
-    config = process_config(config_file.config)
-    seed = config['seed']
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    model = MFAN
-    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
-    torch.use_deterministic_algorithms(True)  # 查找为啥不能复现代码的原因
-    train_and_test(model)
+config = process_config(config_file.config)
+seed = config['seed']
+torch.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)
+np.random.seed(seed)
+random.seed(seed)
+model = MFAN
+# os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+# torch.use_deterministic_algorithms(True)  # 查找为啥不能复现代码的原因
+train_and_test(model)

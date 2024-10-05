@@ -6,11 +6,13 @@
 
 在best的基础上去掉梯度裁剪
 """
+## 初始最佳：0.8835
 
 import os
 
-# from ClippyAdam import ClippyAdam
+# from graph_part.ClippyAdam import ClippyAdam
 
+# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import csv
 import torch
@@ -28,13 +30,14 @@ import torch.nn.init as init
 import pickle
 import json, os, time
 import argparse
-import warnings
-import random
 import sys
+import warnings
 from PIL import Image
+import clip
+import random
 
 sys.path.append('/../image_part')
-from graph_part import config_file
+from graph_part.code_v1 import config_file
 from graph_part.layer import *
 from graph_part.utils import *
 from graph_part.align_loss import *
@@ -43,7 +46,7 @@ warnings.filterwarnings("ignore")
 
 parser = argparse.ArgumentParser()
 parser.description = "ini"
-parser.add_argument("-t", "--task", type=str, default="weibo2")
+parser.add_argument("-t", "--task", type=str, default="pheme")
 parser.add_argument("-g", "--gpu_id", type=str, default="1")
 parser.add_argument("-c", "--config_name", type=str, default="single3.json")
 parser.add_argument("-T", "--thread_name", type=str, default="Thread-1")
@@ -73,21 +76,26 @@ class NeuralNetwork(nn.Module):
         self.optimizer.zero_grad()
         # 这里调用mfan的forward
         logit_original, dist_og, hidden, features = self.forward(x_tid, x_text)
-        # 分类损失
         loss_classification = loss(logit_original, y)
-
-        # 模态对齐损失
+        # 分类损失
         loss_mse = nn.MSELoss()
+        # 模态对齐损失
         loss_dis = loss_mse(dist_og[0], dist_og[1])
 
         # hidden的shape为[batch_size,output_dim]
         # 此时features的shape为[batch_size,2,output_dim],为每一份数据创建了一个副本，进行对比
-        loss_cons = SupConLoss(temperature=1.0)
+        loss_cons = SupConLoss(temperature=0.5)
         loss_constrative = loss_cons(features, y)
 
-        losses = [loss_classification, loss_constrative, loss_dis]
-        important = [loss_classification]
-        loss_defense = geometric_loss(losses, important)
+        losses = []
+        losses.append(loss_classification)
+        losses.append(loss_constrative)
+        losses.append(loss_dis)
+
+        # important = []
+        # important.append(loss_classification)
+        # important.append(loss_dis)
+        loss_defense = geometric_loss(losses)
         # loss_defense=detach_loss_v2(losses)
         loss_defense.backward()
 
@@ -104,7 +112,7 @@ class NeuralNetwork(nn.Module):
             loss_adv = loss(loss_adv, y)
             loss_adv.backward()
         pgd_word.restore()
-        nn.utils.clip_grad_norm_(self.parameters(), max_norm=5, norm_type=2)  # 使用第二种裁剪方式
+        # nn.utils.clip_grad_norm_(self.parameters(), max_norm=10, norm_type=2)  # 使用第二种裁剪方式
         self.optimizer.step()
         corrects = (torch.max(logit_original, 1)[1].view(y.size()).data == y.data).sum()
         accuracy = 100 * corrects / len(y)
@@ -121,7 +129,10 @@ class NeuralNetwork(nn.Module):
         if torch.cuda.is_available():
             self.cuda()
         batch_size = self.config['batch_size']
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=2e-3, weight_decay=0)
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=2e-3)
+        # self.optimizer = ClippyAdam(self.parameters(), lr=2e-3)
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer=self.optimizer,
+                                                                    T_max=self.config['epochs'])  # * iters
 
         X_train_tid = torch.LongTensor(X_train_tid)
         X_train = torch.LongTensor(X_train)
@@ -144,7 +155,11 @@ class NeuralNetwork(nn.Module):
                 total = len(dataloader)
                 batch_x_tid, batch_x_text, batch_y = (item.cuda(device=self.device) for item in data)
                 self.mfan(batch_x_tid, batch_x_text, batch_y, loss, i, total, params, pgd_word)
+
+                if self.init_clip_max_norm is not None:
+                    utils.clip_grad_norm_(self.parameters(), max_norm=self.init_clip_max_norm)
             self.evaluate(X_dev_tid, X_dev, y_dev)
+            # self.scheduler.step() ## 每个epoch结束后调整学习率
 
     def evaluate(self, X_dev_tid, X_dev, y_dev):
         y_pred = self.predict(X_dev_tid, X_dev)
@@ -184,7 +199,7 @@ class resnet50():
         self.model = models.resnet50(pretrained=True).cuda()
         self.model.fc = nn.Linear(2048, 300).cuda()
         torch.nn.init.eye_(self.model.fc.weight)
-        self.path = os.path.dirname(os.getcwd()) + '/../dataset/weibo/weibo_images/weibo_images_all/'
+        self.path = os.path.dirname(os.getcwd()) + '/../dataset/pheme/pheme_image/pheme_images_jpg/'
         self.trans = self.img_trans()
 
     def img_trans(self):
@@ -212,6 +227,30 @@ class resnet50():
         return img_output
 
 
+## 通过Clip加载图像
+class ClipModel:
+    def __init__(self, model, preprocess, device):
+        self.newid2imgnum = config['newid2imgnum']
+        self.model = model
+        self.model.visual.attnpool.c_proj = torch.nn.Linear(2048, 300, dtype=torch.float16).cuda()
+        torch.nn.init.eye_(self.model.visual.attnpool.c_proj.weight)
+        self.path = os.path.dirname(os.getcwd()) + '/../dataset/pheme/pheme_image/pheme_images_jpg/'
+        self.trans = preprocess
+        self.device = device
+
+    def forward(self, xtid):
+        img_list = []
+        for newid in xtid.cpu().numpy():
+            imgnum = self.newid2imgnum[newid]
+            imgpath = self.path + imgnum + '.jpg'
+            im = self.trans(Image.open(imgpath)).unsqueeze(0)
+            img_list.append(im)
+        batch_img = torch.cat(img_list, dim=0).to(device=self.device)
+        with torch.no_grad():
+            img_output = self.model.encode_image(batch_img)  ## (64,512)
+        return img_output.to(torch.float32)
+
+
 class MFAN(NeuralNetwork):
     def __init__(self, config, adj, original_adj):
         super(MFAN, self).__init__()
@@ -225,16 +264,21 @@ class MFAN(NeuralNetwork):
         self.mh_attention = TransformerBlock(input_size=300, n_heads=8, attn_dropout=0)
         self.word_embedding = nn.Embedding(num_embeddings=V, embedding_dim=D, padding_idx=0,
                                            _weight=torch.from_numpy(embedding_weights))
+        self.text_embedding = LSTMEncoder(input_size=300, hidden_size=300, num_layers=1)
         self.cosmatrix = self.calculate_cos_matrix()
         self.gat_relation = Signed_GAT(node_embedding=config['node_embedding'], cosmatrix=self.cosmatrix, nfeat=300, \
                                        uV=self.uV, nb_heads=1,
                                        original_adj=original_adj, dropout=0)
         self.image_embedding = resnet50()
+        clip_model, preprocess = clip.load("RN50", device=self.device)  ## ViT-B/32效果不好,这个0.8831
+        self.image_embedding2 = ClipModel(clip_model, preprocess, device=self.device)
         fusion_dim = config['fusion_dim']
         self.model_fusion = VLTransformer(fusion_dim, config)
         self.convs = nn.ModuleList([nn.Conv1d(300, 100, kernel_size=K) for K in config['kernel_sizes']])
         self.max_poolings = nn.ModuleList([nn.MaxPool1d(kernel_size=maxlen - K + 1) for K in config['kernel_sizes']])
+        self.dropout = nn.Dropout(dropout_rate)
         self.relu = nn.ReLU()
+        self.tanh = nn.Tanh()
         self.alignfc_g = nn.Linear(in_features=300, out_features=300)
         self.alignfc_t = nn.Linear(in_features=300, out_features=300)
         self.init_weight()
@@ -258,11 +302,16 @@ class MFAN(NeuralNetwork):
         X_text = self.word_embedding(X_text)
         if self.config['user_self_attention'] == True:
             X_text = self.mh_attention(X_text, X_text, X_text)
+
+        ## 修改文本编码器为lstm
+        X_text, _ = self.text_embedding(X_text)
         X_text = X_text.permute(0, 2, 1)
         # 从GAT获取传播结构
         rembedding = self.gat_relation.forward(X_tid)
         # resnet50获取图像嵌入
-        iembedding = self.image_embedding.forward(X_tid)
+        # iembedding = self.image_embedding.forward(X_tid)
+        ## 更换图像编码器为Cliptengx
+        iembedding = self.image_embedding2.forward(X_tid)
         conv_block = [rembedding]
         for _, (Conv, max_pooling) in enumerate(zip(self.convs, self.max_poolings)):
             act = self.relu(Conv(X_text))
@@ -297,7 +346,7 @@ class MFAN(NeuralNetwork):
 
 
 def load_dataset():
-    pre = os.path.dirname(os.getcwd()) + '/../dataset/weibo/weibo_files'
+    pre = os.path.dirname(os.getcwd()) + '/../dataset/pheme/pheme_files/'
     X_train_tid, X_train, y_train, word_embeddings, adj = pickle.load(open(pre + "/train.pkl", 'rb'))
     X_dev_tid, X_dev, y_dev = pickle.load(open(pre + "/dev.pkl", 'rb'))
     X_test_tid, X_test, y_test = pickle.load(open(pre + "/test.pkl", 'rb'))
@@ -305,16 +354,16 @@ def load_dataset():
     config['node_embedding'] = pickle.load(open(pre + "/node_embedding.pkl", 'rb'))[0]
     print("#nodes: ", adj.shape[0])
 
-    # newid2mid处理成类似格式：{1: 'zhangsan', 2: 'lisi', 3: 'wangwu', 4: 'zhaoliu', 5: 'zhouqi'}，新闻id与结点标对应
     with open(pre + '/new_id_dic.json', 'r') as f:
         newid2mid = json.load(f)
         newid2mid = dict(zip(newid2mid.values(), newid2mid.keys()))
-    mid2num = {}
-    # 是类似格式：{'z5qFIwiEj': 1, 'yBpiLiBnk': 2,.....} ，结点下标与新闻id
-    for file in os.listdir(
-            os.path.dirname(os.getcwd()) + '/../dataset/weibo/weibocontentwithimage/original-microblog/'):
-        mid2num[file.split('_')[-2]] = file.split('_')[0]
-
+    content_path = os.path.dirname(os.getcwd()) + '/../dataset/pheme/'
+    with open(content_path + '/content.csv', 'r') as f:
+        reader = csv.reader(f)
+        result = list(reader)[1:]
+        mid2num = {}
+        for line in result:
+            mid2num[line[1]] = line[0]
     newid2num = {}
     for id in X_train_tid:
         newid2num[id] = mid2num[newid2mid[id]]
@@ -330,7 +379,7 @@ def load_dataset():
 
 
 def load_original_adj(adj):
-    pre = os.path.dirname(os.getcwd()) + '/../dataset/weibo/weibo_files/'
+    pre = os.path.dirname(os.getcwd()) + '/../dataset/pheme/pheme_files/'
     path = os.path.join(pre, 'original_adj')
     with open(path, 'r') as f:
         original_adj_dict = json.load(f)
@@ -342,7 +391,7 @@ def load_original_adj(adj):
 
 
 def train_and_test(model):
-    model_suffix = "mfan"
+    model_suffix = model.__name__.lower().strip("text")
     res_dir = 'exp_result'
     if not os.path.exists(res_dir):
         os.mkdir(res_dir)
@@ -355,14 +404,12 @@ def train_and_test(model):
     res_dir = config['save_path'] = os.path.join(res_dir, 'best_model_in_each_config')
     if not os.path.exists(res_dir):
         os.mkdir(res_dir)
-
-    # 最优模型路径
     config['save_path'] = os.path.join(res_dir, args.thread_name + '_' + 'config' + args.config_name.split(".")[
-        0] + '_best_model_weights_' + model_suffix + '_best4')
+        0] + '_best_model_weights_' + model_suffix + "lstmwithclip")
     dir_path = os.path.join('exp_result', args.task, args.description)
     if not os.path.exists(dir_path):
         os.mkdir(dir_path)
-    #
+
     # if os.path.exists(config['save_path']):
     #     os.system('rm {}'.format(config['save_path']))
 
@@ -371,17 +418,16 @@ def train_and_test(model):
     X_test_tid, X_test, y_test, adj = load_dataset()
     original_adj = load_original_adj(adj)
     nn = model(config, adj, original_adj)
-    # if torch.cuda.device_count() > 1:  ## 自定义的训练方法导致多卡训练无效
-    #     print("多卡并行！")
-    #     nn = torch.nn.DataParallel(model(config, adj, original_adj))
-    #     nn = nn.module
 
-    # nn.fit(X_train_tid, X_train, y_train,
-    #        X_dev_tid, X_dev, y_dev)
+    nn.fit(X_train_tid, X_train, y_train,
+           X_dev_tid, X_dev, y_dev)
 
-    # 当前最佳模型
     nn.load_state_dict(torch.load(
-        "../exp_result/weibo2/exp_description/best_model_in_each_config/best_model_weibo_second"))
+        "exp_result/pheme/exp_description/best_model_in_each_config/Thread-1_configsingle3_best_model_weights_mfanlstmwithclip"))
+
+    # ## 最佳模型
+    # nn.load_state_dict(torch.load("../exp_result/pheme/exp_description/best_model_in_each_config/best_model_pheme"))
+
     y_pred = nn.predict(X_test_tid, X_test)
     res = classification_report(y_test, y_pred, target_names=config['target_names'], digits=3, output_dict=True)
     for k, v in res.items():
@@ -395,14 +441,11 @@ def train_and_test(model):
     return res
 
 
-if __name__ == '__main__':
-    config = process_config(config_file.config)
-    seed = config['seed']
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    model = MFAN
-    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
-    torch.use_deterministic_algorithms(True)  # 查找为啥不能复现代码的原因
-    train_and_test(model)
+config = process_config(config_file.config)
+seed = config['seed']
+torch.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)
+np.random.seed(seed)
+random.seed(seed)
+model = MFAN
+train_and_test(model)

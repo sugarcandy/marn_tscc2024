@@ -140,6 +140,25 @@ class OutputLayer(nn.Module):
         return F.log_softmax(output, dim=1), combined_x
 
 
+## 不使用模态特定信息
+class OutputLayer2(nn.Module):
+    def __init__(self, d_in, d_hidden, n_classes, modal_num, dropout=0.5):
+        super(OutputLayer2, self).__init__()
+        self.mlp_head = nn.Sequential(
+            nn.LayerNorm(d_in),
+            nn.Linear(d_in, d_hidden),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        )
+        self.classifier = nn.Linear(d_hidden, n_classes)
+
+    def forward(self, x, attn_embedding):
+        x = self.mlp_head(x)
+        # combined_x = torch.cat((x, attn_embedding), dim=-1)
+        output = self.classifier(x)
+        return F.log_softmax(output, dim=1), x
+
+
 class FeedForwardLayer(nn.Module):
 
     def __init__(self, d_in, d_hid, dropout=0.1):
@@ -193,6 +212,60 @@ class VLTransformer(nn.Module):
             self.FeedForward.append(feedforward)
         d_in = self.d_v * self.n_head * self.modal_num
         self.Outputlayer = OutputLayer(d_in, self.d_v * self.n_head, self.n_class, self.modal_num, self.dropout)
+
+    def forward(self, x):
+        bs = x.size(0)
+        attn_map = []
+        x, _attn = self.InputLayer(x)
+        attn = _attn.mean(dim=1)
+        attn_map.append(attn.detach().cpu().numpy())
+
+        for i in range(self.n_layer):
+            x, _attn = self.Encoder[i](q=x, k=x, v=x, modal_num=self.modal_num)
+            attn = _attn.mean(dim=1)
+            # x = x.transpose(1, 0)#nn.multi_head_attn
+            # x, attn = self.Encoder[i](x, x, x)#nn.multi_head_attn
+            # x = x.transpose(1, 0)#nn.multi_head_attn
+            x = self.FeedForward[i](x)
+            attn_map.append(attn.detach().cpu().numpy())
+
+        x = x.view(bs, -1)
+        attn_embedding = attn.view(bs, -1)
+        output, hidden = self.Outputlayer(x, attn_embedding)
+        return output, hidden, attn_map
+
+
+# 多模态注意力——去掉模态特定信息
+class VLTransformer2(nn.Module):
+    def __init__(self, input_data_dims, hyperpm):
+        super(VLTransformer2, self).__init__()
+        self.hyperpm = hyperpm
+        self.input_data_dims = input_data_dims
+        self.d_q = hyperpm['n_hidden']
+        self.d_k = hyperpm['n_hidden']
+        self.d_v = hyperpm['n_hidden']
+        self.n_head = hyperpm['n_head']
+        self.dropout = hyperpm['fusion_dropout']
+        self.n_layer = hyperpm['n_layer']
+        self.modal_num = hyperpm['modal_num']
+        self.n_class = hyperpm['num_classes']
+        self.d_out = self.d_v * self.n_head * self.modal_num  # 24*4*2
+
+        self.InputLayer = VariLengthInputLayer(self.input_data_dims, self.d_k, self.d_v, self.n_head, self.dropout)
+        self.Encoder = []
+        self.FeedForward = []
+
+        for i in range(self.n_layer):
+            encoder = EncodeLayer(self.d_k * self.n_head, self.d_k, self.d_v, self.n_head, self.dropout)
+            # encoder = nn.MultiheadAttention(self.d_k * self.n_head, self.n_head, dropout = self.dropout) #nn.multi_head_attn
+            self.add_module('encode_%d' % i, encoder)
+            self.Encoder.append(encoder)
+
+            feedforward = FeedForwardLayer(self.d_v * self.n_head, self.d_v * self.n_head, dropout=self.dropout)
+            self.add_module('feed_%d' % i, feedforward)
+            self.FeedForward.append(feedforward)
+        d_in = self.d_v * self.n_head * self.modal_num
+        self.Outputlayer = OutputLayer2(d_in, self.d_v * self.n_head, self.n_class, self.modal_num, self.dropout)
 
     def forward(self, x):
         bs = x.size(0)
@@ -459,7 +532,7 @@ class FaceAttributeDecoder(nn.Module):
 
 
 class GCN(nn.Module):
-    def __init__(self,num_features,hidden,out_features):
+    def __init__(self, num_features, hidden, out_features):
         super(GCN, self).__init__()
         self.conv1 = GCNConv(num_features, hidden)
         self.conv2 = GCNConv(hidden, out_features)
@@ -472,17 +545,16 @@ class GCN(nn.Module):
         return x
 
 
-# AFN
+# AFT
 class hard_fc(nn.Module):
-    def __init__(self, d_in,d_hid, DroPout=0):
+    def __init__(self, d_in, d_hid, DroPout=0):
         super().__init__()
-        self.w_1 = nn.Linear(d_in, d_hid) # position-wise
-        self.w_2 = nn.Linear(d_hid, d_in) # position-wise
+        self.w_1 = nn.Linear(d_in, d_hid)  # position-wise
+        self.w_2 = nn.Linear(d_hid, d_in)  # position-wise
         self.layer_norm = nn.LayerNorm(d_in, eps=1e-6)
         self.dropout = nn.Dropout(DroPout)
 
     def forward(self, x):
-
         residual = x
 
         x = self.w_2(F.relu(self.w_1(x)))
@@ -492,6 +564,7 @@ class hard_fc(nn.Module):
         x = self.layer_norm(x)
 
         return x
+
 
 # 对抗性训练
 class PGD(object):
@@ -537,3 +610,15 @@ class PGD(object):
         for name, param in self.model.named_parameters():
             if param.requires_grad and param.grad is not None:
                 param.grad = self.grad_backup[name]
+
+
+class LSTMEncoder(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, bidirectional=False):
+        super(LSTMEncoder, self).__init__()
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, bidirectional=bidirectional)
+
+    def forward(self, x):
+        # x 的形状应该是 (batch_size, sequence_length, input_size)
+        out, _ = self.lstm(x)
+        # 返回 LSTM 的输出和最后一个隐藏状态
+        return out, _

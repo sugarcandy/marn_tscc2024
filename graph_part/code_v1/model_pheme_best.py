@@ -9,9 +9,10 @@
 
 import os
 
-from ClippyAdam import ClippyAdam
+# from ClippyAdam import ClippyAdam
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 import csv
 import torch
 import torch.nn as nn
@@ -28,16 +29,15 @@ import torch.nn.init as init
 import pickle
 import json, os, time
 import argparse
-import config_file
-import random
 import sys
-from PIL import Image
-
-sys.path.append('/../image_part')
-from layer import *
 import warnings
-from utils import *
-from align_loss import *
+from PIL import Image
+import random
+sys.path.append('/../image_part')
+from graph_part import config_file
+from graph_part.layer import *
+from graph_part.utils import *
+from graph_part.align_loss import *
 
 warnings.filterwarnings("ignore")
 
@@ -81,7 +81,7 @@ class NeuralNetwork(nn.Module):
 
         # hidden的shape为[batch_size,output_dim]
         # 此时features的shape为[batch_size,2,output_dim],为每一份数据创建了一个副本，进行对比
-        loss_cons = SupConLoss()
+        loss_cons = SupConLoss(temperature=0.5)
         loss_constrative = loss_cons(features, y)
 
         losses = []
@@ -93,6 +93,7 @@ class NeuralNetwork(nn.Module):
         # important.append(loss_classification)
         # important.append(loss_dis)
         loss_defense = geometric_loss(losses)
+        # loss_defense=detach_loss_v2(losses)
         loss_defense.backward()
 
         # 对抗性训练
@@ -392,7 +393,7 @@ def train_and_test(model):
     #        X_dev_tid, X_dev, y_dev)
 
     # nn.load_state_dict(torch.load(
-    #     "../exp_result/pheme/exp_description/best_model_in_each_config/Thread-1_configsingle3_best_model_weights_mfan"))
+    #     "exp_result/pheme/exp_description/best_model_in_each_config/Thread-1_configsingle3_best_model_weights_mfan"))
 
     nn.load_state_dict(torch.load("../exp_result/pheme/exp_description/best_model_in_each_config/best_model_pheme"))
 

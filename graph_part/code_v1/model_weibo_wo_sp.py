@@ -129,7 +129,7 @@ class NeuralNetwork(nn.Module):
 
         # DataLoader
         dataset = TensorDataset(X_train_tid, X_train, y_train)
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
         loss = nn.CrossEntropyLoss()
         params = [(name, param) for name, param in self.named_parameters()]
@@ -231,7 +231,7 @@ class MFAN(NeuralNetwork):
                                        original_adj=original_adj, dropout=0)
         self.image_embedding = resnet50()
         fusion_dim = config['fusion_dim']
-        self.model_fusion = VLTransformer(fusion_dim, config)
+        self.model_fusion = VLTransformer2(fusion_dim, config)
         self.convs = nn.ModuleList([nn.Conv1d(300, 100, kernel_size=K) for K in config['kernel_sizes']])
         self.max_poolings = nn.ModuleList([nn.MaxPool1d(kernel_size=maxlen - K + 1) for K in config['kernel_sizes']])
         self.relu = nn.ReLU()
@@ -358,7 +358,7 @@ def train_and_test(model):
 
     # 最优模型路径
     config['save_path'] = os.path.join(res_dir, args.thread_name + '_' + 'config' + args.config_name.split(".")[
-        0] + '_best_model_weights_' + model_suffix + '_best4')
+        0] + '_best_model_weights_' + model_suffix + "wosp111")
     dir_path = os.path.join('exp_result', args.task, args.description)
     if not os.path.exists(dir_path):
         os.mkdir(dir_path)
@@ -380,8 +380,12 @@ def train_and_test(model):
     #        X_dev_tid, X_dev, y_dev)
 
     # 当前最佳模型
+    # nn.load_state_dict(torch.load(
+    #     "../exp_result/weibo2/exp_description/best_model_in_each_config/best_model_weibo_second"))
+
     nn.load_state_dict(torch.load(
-        "../exp_result/weibo2/exp_description/best_model_in_each_config/best_model_weibo_second"))
+        "exp_result/weibo2/exp_description/best_model_in_each_config/Thread-1_configsingle3_best_model_weights_mfanwosp"))
+    ## exp_result/weibo2/exp_description/best_model_in_each_config/Thread-1_configsingle3_best_model_weights_mfanwosp
     y_pred = nn.predict(X_test_tid, X_test)
     res = classification_report(y_test, y_pred, target_names=config['target_names'], digits=3, output_dict=True)
     for k, v in res.items():
