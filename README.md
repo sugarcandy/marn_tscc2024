@@ -1,6 +1,5 @@
-# MFAN
-  Code for the paper Modality-Aware Representation Network for Rumor
-Detection with Multitask Optimization Learning
+# Code for the paper Modality-Aware Representation Network for Rumor Detection with Multitask Optimization Learning
+  
 # Dataset
   The datasets used in the experiments were based on the two publicly available Weibo and PHEME datasets released by Song et al. (2019) and Zubiaga et al. (2017), and the preprocess process was based on the work by Yuan et al. (2019):
   
